@@ -1,0 +1,19 @@
+---
+HeaderFilterRegex: './.*'
+Checks: >
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  readability-*,
+  misc-*,
+  -cppcoreguidelines-*,
+  -modernize-*,
+  -readability-identifier-naming,
+  -readability-identifier-length,
+  -google-*,
+  -llvm-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+
+WarningsAsErrors: ''
+FormatStyle: none
+CheckOptions: []
