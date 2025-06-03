@@ -12,8 +12,9 @@ Checks: >
   -readability-identifier-length,
   -google-*,
   -llvm-*,
-  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -bugprone-easily-swappable-parameters
 
 WarningsAsErrors: ''
-FormatStyle: none
+FormatStyle: file
 CheckOptions: []

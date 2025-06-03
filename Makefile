@@ -10,10 +10,10 @@ all: $(TARGET)
 lint:
 	@$(LINTER) --config-file=.clang-tidy --quiet *.c -- $(CFLAGS)
 
-format:
+fmt:
 	@$(FORMATTER) -style=file -i *.c
 
 clean:
 	@rm -f $(TARGET)
 
-.PHONY: lint format clean
+.PHONY: lint fmt clean
