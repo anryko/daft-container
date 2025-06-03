@@ -16,10 +16,10 @@
 
 #include "ename.c.inc" // Defines ename and MAX_ENAME
 
-#define ERROR_MSG_BUF_SIZE 500
-#define STACK_SIZE (1024 * 1024)
+static constexpr size_t ERROR_MSG_BUF_SIZE = 500;
+static constexpr size_t STACK_SIZE = (size_t)(1024 * 1024); // 1MB
 
-static int pipe_fd[2];
+static int pipe_fd[2] = {};
 
 struct config {
     char **command;
@@ -177,7 +177,8 @@ static void child_ns_user_map_setup(struct config *cfg, pid_t child_pid) {
         }
         return;
     }
-    const int map_buf_size = 100;
+
+    constexpr size_t map_buf_size = 100;
     char map_buf[map_buf_size];
     char map_path[PATH_MAX];
 
@@ -207,16 +208,16 @@ int main(int argc, char *argv[]) {
         errExit("pipe");
     }
 
-    char *stack = mmap(NULL, (size_t)STACK_SIZE, PROT_READ | PROT_WRITE,
+    char *stack = mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
     if (stack == MAP_FAILED) {
         errExit("mmap");
     }
 
-    pid_t child_pid = clone(clone_exec, stack + (ptrdiff_t)STACK_SIZE,
+    pid_t child_pid = clone(clone_exec, stack + STACK_SIZE,
                             cfg.flags | SIGCHLD, &cfg);
 
-    munmap(stack, (size_t)STACK_SIZE);
+    munmap(stack, STACK_SIZE);
 
     child_ns_user_map_setup(&cfg, child_pid);
 
