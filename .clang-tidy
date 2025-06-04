@@ -13,7 +13,8 @@ Checks: >
   -google-*,
   -llvm-*,
   -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
-  -bugprone-easily-swappable-parameters
+  -bugprone-easily-swappable-parameters,
+  -misc-include-cleaner
 
 WarningsAsErrors: ''
 FormatStyle: file

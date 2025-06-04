@@ -10,7 +10,6 @@
 #include <stdnoreturn.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -23,6 +22,7 @@ static int pipe_fd[2] = {};
 
 struct config {
     char **command;
+    char *hostname;
     int flags;
     bool do_verbose;
     bool do_root;
@@ -107,7 +107,8 @@ noreturn static void command_line_usage(char *pname) {
 static void config_init(struct config *cfg, int argc, char *argv[]) {
     int opt;
 
-    cfg->flags = CLONE_NEWUSER;
+    cfg->flags = CLONE_NEWUSER | CLONE_NEWUTS;
+    cfg->hostname = "daft-container";
     cfg->do_verbose = false;
     cfg->do_root = true;
 
@@ -135,16 +136,24 @@ static int clone_exec(void *arg) {
     struct config *cfg = (struct config *)arg;
 
     close(pipe_fd[1]);
+    pid_t child_pid = getpid();
 
     char ch;
     if (read(pipe_fd[0], &ch, 1) != 0) {
-        fprintf(stderr, "child[%d]: failed to read from pipe\n", getpid());
+        fprintf(stderr, "child[%d]: failed to read from pipe\n", child_pid);
         exit(EXIT_FAILURE);
     }
     close(pipe_fd[0]);
 
     if (cfg->do_verbose) {
-        printf("child[%d]: excuting command: %s\n", getpid(), cfg->command[0]);
+        printf("child[%d]: set hostname: %s\n", child_pid, cfg->hostname);
+    }
+    if (sethostname(cfg->hostname, strlen(cfg->hostname)) == -1) {
+        errExit("sethostname");
+    }
+
+    if (cfg->do_verbose) {
+        printf("child[%d]: excuting command: %s\n", child_pid, cfg->command[0]);
     }
     execvp(cfg->command[0], cfg->command);
     errExit("execvp");
@@ -214,8 +223,8 @@ int main(int argc, char *argv[]) {
         errExit("mmap");
     }
 
-    pid_t child_pid = clone(clone_exec, stack + STACK_SIZE,
-                            cfg.flags | SIGCHLD, &cfg);
+    pid_t child_pid =
+        clone(clone_exec, stack + STACK_SIZE, cfg.flags | SIGCHLD, &cfg);
 
     munmap(stack, STACK_SIZE);
 
