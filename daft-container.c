@@ -159,19 +159,19 @@ static int clone_exec(void *arg) {
     errExit("execvp");
 }
 
-int file_write(char *content, char *file_path) {
+bool file_write(char content[static 1], char file_path[static 1]) {
     int fd = open(file_path, O_RDWR);
     if (fd == -1) {
         errMsg("open %s", file_path);
-        return -1;
+        return false;
     }
 
     size_t map_len = strlen(content);
-    int status = 0;
+    bool status = true;
 
     if (write(fd, content, map_len) != (ssize_t)map_len) {
         errMsg("write %s", file_path);
-        status = -1;
+        status = false;
     }
 
     close(fd);
@@ -193,18 +193,18 @@ static void child_ns_user_map_setup(struct config *cfg, pid_t child_pid) {
 
     snprintf(map_path, PATH_MAX, "/proc/%d/uid_map", child_pid);
     snprintf(map_buf, map_buf_size, "0 %d 1", getuid());
-    if (file_write(map_buf, map_path) == -1) {
+    if (!file_write(map_buf, map_path)) {
         errExit("set uid_map");
     }
 
     snprintf(map_path, PATH_MAX, "/proc/%d/setgroups", child_pid);
-    if (file_write("deny", map_path) == -1) {
+    if (!file_write("deny", map_path)) {
         errExit("set setgroups deny");
     }
 
     snprintf(map_path, PATH_MAX, "/proc/%d/gid_map", child_pid);
     snprintf(map_buf, map_buf_size, "0 %d 1", getgid());
-    if (file_write(map_buf, map_path) == -1) {
+    if (!file_write(map_buf, map_path)) {
         errExit("set gid_map");
     }
 }
