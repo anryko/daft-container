@@ -10,7 +10,10 @@
 #include <stdnoreturn.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
+#include <syscall.h>
 #include <unistd.h>
 
 #include "ename.c.inc" // Defines ename and MAX_ENAME
@@ -26,6 +29,7 @@ struct config {
     int flags;
     bool do_verbose;
     bool do_root;
+    char *new_root_path;
 };
 
 noreturn static void terminate(bool useExit3) {
@@ -101,24 +105,29 @@ noreturn static void command_line_usage(char *pname) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "    -h        Help\n");
     fprintf(stderr, "    -v        Verbose mode\n");
+    fprintf(stderr, "    -r        New root directory\n");
     exit(EXIT_FAILURE);
 }
 
 static void config_init(struct config *cfg, int argc, char *argv[]) {
     int opt;
 
-    cfg->flags = CLONE_NEWUSER | CLONE_NEWUTS;
+    cfg->flags = CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS;
     cfg->hostname = "daft-container";
     cfg->do_verbose = false;
     cfg->do_root = true;
+    cfg->new_root_path = nullptr;
 
-    while ((opt = getopt(argc, argv, "+hv")) != -1) {
+    while ((opt = getopt(argc, argv, "+hvr:")) != -1) {
         switch (opt) {
         case 'v':
             cfg->do_verbose = true;
             break;
         case 'h':
             command_line_usage(argv[0]);
+        case 'r':
+            cfg->new_root_path = optarg;
+            break;
         default:
             command_line_help(argv[0]);
         }
@@ -132,34 +141,120 @@ static void config_init(struct config *cfg, int argc, char *argv[]) {
     cfg->command = &argv[optind];
 }
 
+bool child_ns_mnt_root_pivot(const char new_root_path[static 1]) {
+    const char *put_root_path = ".old_root";
+    int cwd_fd = -1;
+    bool is_proc_mounted = false;
+
+    // Make / private so mount changes don't propagate to the parent namespace.
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == -1) {
+        errMsg("mount('/', MS_PRIVATE)");
+        goto error;
+    }
+    // Make sure new rootfs path is a valid mount point.
+    if (mount(new_root_path, new_root_path, NULL, MS_BIND, NULL) == -1) {
+        errMsg("'%s' not a valid mountpoint");
+        goto error;
+    }
+    // Save current working directory.
+    cwd_fd = open(".", O_RDONLY | O_DIRECTORY);
+    if (cwd_fd == -1) {
+        errMsg("open() current directory");
+        goto error;
+    }
+    // Switch to new root directory.
+    if (chdir(new_root_path) == -1) {
+        errMsg("chdir('%s')", new_root_path);
+        goto error;
+    }
+    // Create directory to hold the old root.
+    if (mkdir(put_root_path, 0700) == -1 && errno != EEXIST) {
+        errMsg("mkdir('%s')", put_root_path);
+        goto error;
+    }
+    // Pivot root to current direstory.
+    if (syscall(SYS_pivot_root, ".", put_root_path) == -1) {
+        errMsg("syscall pivot_root to '%s'", new_root_path);
+        goto error;
+    }
+    // Switch to new root after pivot.
+    if (chdir("/") == -1) {
+        errMsg("chdir('/') after pivot root");
+        goto error;
+    }
+    // Ensure /proc exists at new root.
+    if (mkdir("/proc", 0555) == -1 && errno != EEXIST) {
+        errMsg("mkdir('/proc')");
+        goto error;
+    }
+    // Mount fresh /proc
+    if (mount("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV,
+              NULL) == -1) {
+        errMsg("mount('/proc')");
+        goto error;
+    }
+    is_proc_mounted = true;
+    // Unmount and remove old root.
+    if (umount2(put_root_path, MNT_DETACH) == -1) {
+        errMsg("umount2('%s')", put_root_path);
+        goto error;
+    }
+    if (rmdir(put_root_path) == -1) {
+        errMsg("rmdir('%s')", put_root_path);
+        goto error;
+    }
+
+    close(cwd_fd);
+    return true;
+
+error:
+    if (is_proc_mounted) {
+        umount2("/proc", MNT_DETACH);
+    }
+
+    umount2(put_root_path, MNT_DETACH);
+    rmdir(put_root_path);
+
+    // Restore original working dir on failure.
+    if (cwd_fd >= 0) {
+        fchdir(cwd_fd);
+        close(cwd_fd);
+    }
+
+    return false;
+}
+
 static int clone_exec(void *arg) {
     struct config *cfg = (struct config *)arg;
 
     close(pipe_fd[1]);
-    pid_t child_pid = getpid();
 
     char ch;
     if (read(pipe_fd[0], &ch, 1) != 0) {
-        fprintf(stderr, "child[%d]: failed to read from pipe\n", child_pid);
+        fprintf(stderr, "failed to read from pipe\n");
         exit(EXIT_FAILURE);
     }
     close(pipe_fd[0]);
 
     if (cfg->do_verbose) {
-        printf("child[%d]: set hostname: %s\n", child_pid, cfg->hostname);
+        printf("set hostname: %s\n", cfg->hostname);
     }
     if (sethostname(cfg->hostname, strlen(cfg->hostname)) == -1) {
         errExit("sethostname");
     }
 
+    if (!child_ns_mnt_root_pivot(cfg->new_root_path)) {
+        errExit("root pivot");
+    }
+
     if (cfg->do_verbose) {
-        printf("child[%d]: excuting command: %s\n", child_pid, cfg->command[0]);
+        printf("excuting command: %s\n", cfg->command[0]);
     }
     execvp(cfg->command[0], cfg->command);
     errExit("execvp");
 }
 
-bool file_write(char content[static 1], char file_path[static 1]) {
+bool file_write(const char content[static 1], const char file_path[static 1]) {
     int fd = open(file_path, O_RDWR);
     if (fd == -1) {
         errMsg("open %s", file_path);
