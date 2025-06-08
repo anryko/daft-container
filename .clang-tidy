@@ -14,7 +14,9 @@ Checks: >
   -llvm-*,
   -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
   -bugprone-easily-swappable-parameters,
-  -misc-include-cleaner
+  -misc-include-cleaner,
+  -readability-function-cognitive-complexity,
+  -readability-magic-numbers
 
 WarningsAsErrors: ''
 FormatStyle: file

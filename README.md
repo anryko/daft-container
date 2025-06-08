@@ -1,16 +1,17 @@
 # daft-container
 
-Small and stupid Linux cgroup2 container written in C.
+Small and stupid Linux container written in C.
 
 ## Motivation
 
-Study Linux containers and cgroup2 namespaces.
+Study Linux containers.
 
 ## Installation
 
 ```sh
 git clone --depth=1 https://github.com/anryko/daft-container.git
 cd daft-container
+sudo apt install -y make
 sudo make setup_apt
 make
 ```
@@ -49,3 +50,8 @@ root           6       1  0 20:39 ?        00:00:00 ps -ef
 /dev/sdc on / type ext4 (rw,relatime,discard,errors=remount-ro,data=ordered)
 proc on /proc type proc (rw,nosuid,nodev,noexec,relatime)
 ```
+
+## Main Resources
+
+- [Namespaces in operation](https://lwn.net/Articles/531114/)
+- [lucavallin/barco](https://github.com/lucavallin/barco)
