@@ -3,7 +3,7 @@ LINTER := clang-tidy-19
 FORMATTER := clang-format-19
 
 TARGET := daft-container
-CFLAGS += -std=c23 -D_GNU_SOURCE -Wall -Wextra -pedantic
+CFLAGS += -std=c23 -D_GNU_SOURCE -Wall -Wextra -pedantic -lcap
 ROOTFS := rootfs
 
 all: $(TARGET)
@@ -20,13 +20,13 @@ setup_apt:
 		debian-archive-keyring mmdebstrap
 
 rootfs:
-	@rm -fr "${ROOTFS}"
+	@sudo rm -fr "${ROOTFS}"
 	@mkdir -p "${ROOTFS}"
 	@mmdebstrap \
 		--variant=important \
-		--skip=output/mknod \
+		--skip=output/dev \
 		stable > "${ROOTFS}".tar
-	@tar xf "${ROOTFS}.tar" -C "${ROOTFS}"
+	@sudo tar xf "${ROOTFS}.tar" -C "${ROOTFS}"
 	@rm "${ROOTFS}.tar"
 
 clean:

@@ -9,9 +9,11 @@
 #include <stdlib.h>
 #include <stdnoreturn.h>
 #include <string.h>
+#include <sys/capability.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <syscall.h>
 #include <unistd.h>
@@ -20,17 +22,6 @@
 
 static constexpr size_t ERROR_MSG_BUF_SIZE = 500;
 static constexpr size_t STACK_SIZE = (size_t)(1024 * 1024); // 1MB
-
-static int pipe_fd[2] = {};
-
-struct config {
-    char **command;
-    char *hostname;
-    int flags;
-    bool do_verbose;
-    bool do_root;
-    char *new_root_path;
-};
 
 noreturn static void terminate(bool useExit3) {
     char *s = getenv("EF_DUMPCORE");
@@ -105,28 +96,46 @@ noreturn static void command_line_usage(char *pname) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "    -h        Help\n");
     fprintf(stderr, "    -v        Verbose mode\n");
-    fprintf(stderr, "    -r        New root directory\n");
+    fprintf(stderr, "    -r        New root directory (default: rootfs)\n");
     exit(EXIT_FAILURE);
 }
 
-static void config_init(struct config *cfg, int argc, char *argv[]) {
+struct container {
+    int pipe_fd[2];
+    pid_t pid;
+    char **command;
+    char *hostname;
+    int flags;
+    bool do_verbose;
+    bool do_root;
+    char *new_root_path;
+    char *put_root_path;
+};
+
+static void container_init(struct container *self, int argc, char *argv[]) {
     int opt;
 
-    cfg->flags = CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS;
-    cfg->hostname = "daft-container";
-    cfg->do_verbose = false;
-    cfg->do_root = true;
-    cfg->new_root_path = nullptr;
+    self->flags = CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS |
+                  CLONE_NEWNET;
+    self->hostname = "daft-container";
+    self->do_verbose = false;
+    self->do_root = true;
+    self->new_root_path = "rootfs";
+    self->put_root_path = ".old_root";
+
+    if (pipe(self->pipe_fd) == -1) {
+        errExit("pipe");
+    }
 
     while ((opt = getopt(argc, argv, "+hvr:")) != -1) {
         switch (opt) {
         case 'v':
-            cfg->do_verbose = true;
+            self->do_verbose = true;
             break;
         case 'h':
             command_line_usage(argv[0]);
         case 'r':
-            cfg->new_root_path = optarg;
+            self->new_root_path = optarg;
             break;
         default:
             command_line_help(argv[0]);
@@ -137,14 +146,13 @@ static void config_init(struct config *cfg, int argc, char *argv[]) {
         fprintf(stderr, "No command provided!\n\n");
         command_line_help(argv[0]);
     }
-
-    cfg->command = &argv[optind];
+    self->command = &argv[optind];
 }
 
-bool child_ns_mnt_root_pivot(const char new_root_path[static 1]) {
-    const char *put_root_path = ".old_root";
+bool container_pivot_root(struct container self[static 1]) {
     int cwd_fd = -1;
     bool is_proc_mounted = false;
+    bool is_sys_mounted = false;
 
     // Make / private so mount changes don't propagate to the parent namespace.
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == -1) {
@@ -152,7 +160,8 @@ bool child_ns_mnt_root_pivot(const char new_root_path[static 1]) {
         goto error;
     }
     // Make sure new rootfs path is a valid mount point.
-    if (mount(new_root_path, new_root_path, NULL, MS_BIND, NULL) == -1) {
+    if (mount(self->new_root_path, self->new_root_path, NULL, MS_BIND | MS_REC,
+              NULL) == -1) {
         errMsg("'%s' not a valid mountpoint");
         goto error;
     }
@@ -163,18 +172,18 @@ bool child_ns_mnt_root_pivot(const char new_root_path[static 1]) {
         goto error;
     }
     // Switch to new root directory.
-    if (chdir(new_root_path) == -1) {
-        errMsg("chdir('%s')", new_root_path);
+    if (chdir(self->new_root_path) == -1) {
+        errMsg("chdir('%s')", self->new_root_path);
         goto error;
     }
     // Create directory to hold the old root.
-    if (mkdir(put_root_path, 0700) == -1 && errno != EEXIST) {
-        errMsg("mkdir('%s')", put_root_path);
+    if (mkdir(self->put_root_path, 0700) == -1 && errno != EEXIST) {
+        errMsg("mkdir('%s')", self->put_root_path);
         goto error;
     }
     // Pivot root to current direstory.
-    if (syscall(SYS_pivot_root, ".", put_root_path) == -1) {
-        errMsg("syscall pivot_root to '%s'", new_root_path);
+    if (syscall(SYS_pivot_root, ".", self->put_root_path) == -1) {
+        errMsg("syscall pivot_root to '%s'", self->new_root_path);
         goto error;
     }
     // Switch to new root after pivot.
@@ -187,20 +196,32 @@ bool child_ns_mnt_root_pivot(const char new_root_path[static 1]) {
         errMsg("mkdir('/proc')");
         goto error;
     }
-    // Mount fresh /proc
+    // Mount fresh /proc.
     if (mount("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV,
               NULL) == -1) {
         errMsg("mount('/proc')");
         goto error;
     }
     is_proc_mounted = true;
-    // Unmount and remove old root.
-    if (umount2(put_root_path, MNT_DETACH) == -1) {
-        errMsg("umount2('%s')", put_root_path);
+    // Ensure /sys exists at new root.
+    if (mkdir("/sys", 0555) == -1 && errno != EEXIST) {
+        errMsg("mkdir('/sys')");
         goto error;
     }
-    if (rmdir(put_root_path) == -1) {
-        errMsg("rmdir('%s')", put_root_path);
+    // Mount fresh /sys.
+    if (mount("sysfs", "/sys", "sysfs",
+              MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) == -1) {
+        errMsg("mount('/proc')");
+        goto error;
+    }
+    is_sys_mounted = true;
+    // Unmount and remove old root.
+    if (umount2(self->put_root_path, MNT_DETACH) == -1) {
+        errMsg("umount2('%s')", self->put_root_path);
+        goto error;
+    }
+    if (rmdir(self->put_root_path) == -1) {
+        errMsg("rmdir('%s')", self->put_root_path);
         goto error;
     }
 
@@ -208,12 +229,15 @@ bool child_ns_mnt_root_pivot(const char new_root_path[static 1]) {
     return true;
 
 error:
+    if (is_sys_mounted) {
+        umount2("/sys", MNT_DETACH);
+    }
     if (is_proc_mounted) {
         umount2("/proc", MNT_DETACH);
     }
 
-    umount2(put_root_path, MNT_DETACH);
-    rmdir(put_root_path);
+    umount2(self->put_root_path, MNT_DETACH);
+    rmdir(self->put_root_path);
 
     // Restore original working dir on failure.
     if (cwd_fd >= 0) {
@@ -224,33 +248,31 @@ error:
     return false;
 }
 
-static int clone_exec(void *arg) {
-    struct config *cfg = (struct config *)arg;
+static int container_clone_exec(void *self) {
+    struct container *c = (struct container *)self;
 
-    close(pipe_fd[1]);
+    close(c->pipe_fd[1]);
 
-    char ch;
-    if (read(pipe_fd[0], &ch, 1) != 0) {
-        fprintf(stderr, "failed to read from pipe\n");
-        exit(EXIT_FAILURE);
+    if (read(c->pipe_fd[0], &(char){0}, 1) != 0) {
+        errExit("failed to read from pipe");
     }
-    close(pipe_fd[0]);
+    close(c->pipe_fd[0]);
 
-    if (cfg->do_verbose) {
-        printf("set hostname: %s\n", cfg->hostname);
+    if (c->do_verbose) {
+        printf("set hostname: %s\n", c->hostname);
     }
-    if (sethostname(cfg->hostname, strlen(cfg->hostname)) == -1) {
+    if (sethostname(c->hostname, strlen(c->hostname)) == -1) {
         errExit("sethostname");
     }
 
-    if (!child_ns_mnt_root_pivot(cfg->new_root_path)) {
-        errExit("root pivot");
+    if (!container_pivot_root(c)) {
+        errExit("container_pivot_root");
     }
 
-    if (cfg->do_verbose) {
-        printf("excuting command: %s\n", cfg->command[0]);
+    if (c->do_verbose) {
+        printf("excuting command: %s\n", c->command[0]);
     }
-    execvp(cfg->command[0], cfg->command);
+    execvp(c->command[0], c->command);
     errExit("execvp");
 }
 
@@ -273,9 +295,9 @@ bool file_write(const char content[static 1], const char file_path[static 1]) {
     return status;
 }
 
-static void child_ns_user_map_setup(struct config *cfg, pid_t child_pid) {
-    if (!cfg->do_root) {
-        if (cfg->do_verbose) {
+static void container_uid_map(struct container self[static 1]) {
+    if (!self->do_root) {
+        if (self->do_verbose) {
             fprintf(stderr, "child[%d]: skipping namespace root escalation",
                     getpid());
         }
@@ -286,50 +308,65 @@ static void child_ns_user_map_setup(struct config *cfg, pid_t child_pid) {
     char map_buf[map_buf_size];
     char map_path[PATH_MAX];
 
-    snprintf(map_path, PATH_MAX, "/proc/%d/uid_map", child_pid);
+    snprintf(map_path, PATH_MAX, "/proc/%d/uid_map", self->pid);
     snprintf(map_buf, map_buf_size, "0 %d 1", getuid());
     if (!file_write(map_buf, map_path)) {
         errExit("set uid_map");
     }
 
-    snprintf(map_path, PATH_MAX, "/proc/%d/setgroups", child_pid);
+    snprintf(map_path, PATH_MAX, "/proc/%d/setgroups", self->pid);
     if (!file_write("deny", map_path)) {
         errExit("set setgroups deny");
     }
 
-    snprintf(map_path, PATH_MAX, "/proc/%d/gid_map", child_pid);
+    snprintf(map_path, PATH_MAX, "/proc/%d/gid_map", self->pid);
     snprintf(map_buf, map_buf_size, "0 %d 1", getgid());
     if (!file_write(map_buf, map_path)) {
         errExit("set gid_map");
     }
 }
 
-int main(int argc, char *argv[]) {
-    struct config cfg;
-    config_init(&cfg, argc, argv);
-
-    if (pipe(pipe_fd) == -1) {
-        errExit("pipe");
-    }
-
+static void container_clone(struct container self[static 1]) {
     char *stack = mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
     if (stack == MAP_FAILED) {
         errExit("mmap");
     }
 
-    pid_t child_pid =
-        clone(clone_exec, stack + STACK_SIZE, cfg.flags | SIGCHLD, &cfg);
+    self->pid = clone(container_clone_exec, stack + STACK_SIZE,
+                      self->flags | SIGCHLD, self);
 
     munmap(stack, STACK_SIZE);
+}
 
-    child_ns_user_map_setup(&cfg, child_pid);
+static void container_wait(struct container self[static 1]) {
+    close(self->pipe_fd[1]);
 
-    close(pipe_fd[1]);
-
-    if (waitpid(child_pid, NULL, 0) == -1) {
+    if (waitpid(self->pid, NULL, 0) == -1) {
         errExit("waitpid");
     }
+}
+
+static void container_devtmpfs_mount(struct container self[static 1]) {
+    char dev_path[PATH_MAX];
+    snprintf(dev_path, PATH_MAX, "%s/dev", self->new_root_path);
+    if (mkdir(dev_path, 0755) == -1 && errno != EEXIST) {
+        errMsg("mkdir('%s')", dev_path);
+    }
+    if (mount("devtmpfs", dev_path, "devtmpfs", 0, NULL) == -1) {
+        errMsg("mount('%s')", dev_path);
+    }
+}
+
+int main(int argc, char *argv[]) {
+    struct container c;
+    container_init(&c, argc, argv);
+    // FIXME: devtmpfs not unmouted.
+    // TODO: move from devtmpfs to tmpfs + mknod.
+    container_devtmpfs_mount(&c);
+    container_clone(&c);
+    container_uid_map(&c);
+    container_wait(&c);
 
     exit(EXIT_SUCCESS);
 }
