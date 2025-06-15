@@ -32,23 +32,27 @@ Usage: ./daft-container [optioins] cmd [arg...]
 Options:
     -h        Help
     -v        Verbose mode
-    -r        New root directory
-$ id
-uid=1000(user) gid=1000(user) groups=1000(user),100(users)
-$ ./daft-container -v -r rootfs bash
+    -r        New root directory (default: rootfs)
+$ sudo ./daft-container -v bash
 set hostname: daft-container
 excuting command: bash
-# id
-uid=0(root) gid=0(root) groups=0(root),65534(nogroup)
-# hostname
+root@daft-container:/# id
+uid=0(root) gid=0(root) groups=0(root)
+root@daft-container:/# hostname
 daft-container
-# ps -ef
+root@daft-container:/# ps -ef
 UID          PID    PPID  C STIME TTY          TIME CMD
-root           1       0  0 20:39 ?        00:00:00 bash
-root           6       1  0 20:39 ?        00:00:00 ps -ef
-# mount
+root           1       0  0 19:00 ?        00:00:00 bash
+root           6       1  0 19:00 ?        00:00:00 ps -ef
+root@daft-container:/# mount
 /dev/sdc on / type ext4 (rw,relatime,discard,errors=remount-ro,data=ordered)
+tmpfs on /dev type tmpfs (rw,nosuid,size=65536k,mode=755)
+devpts on /dev/pts type devpts (rw,nosuid,noexec,relatime,mode=600,ptmxmode=000)
+tmpfs on /dev/shm type tmpfs (rw,nosuid,nodev,relatime)
 proc on /proc type proc (rw,nosuid,nodev,noexec,relatime)
+sysfs on /sys type sysfs (ro,nosuid,nodev,noexec,relatime)
+root@daft-container:/# ls -lah /dev/null
+crw-r--r-- 1 root root 1, 3 Jun 15 19:00 /dev/null
 ```
 
 ## Main Resources

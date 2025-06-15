@@ -100,6 +100,40 @@ noreturn static void command_line_usage(char *pname) {
     exit(EXIT_FAILURE);
 }
 
+struct mount {
+    mode_t perms;
+    const char *source;
+    const char *target;
+    const char *fstype;
+    unsigned long flags;
+    const void *data;
+};
+
+static const struct mount mounts_host[] = {
+    {0755, "tmpfs", "/dev", "tmpfs", MS_NOSUID | MS_STRICTATIME,
+     "mode=0755,size=65536k"},
+    {0755, "devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, NULL},
+    {0755, "tmpfs", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777"}};
+
+static const struct mount mounts_container[] = {
+    {0555, "proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL},
+    {0555, "sysfs", "/sys", "sysfs",
+     MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL}};
+
+static const struct dev_mknod {
+    const char *path;
+    mode_t perms;
+    unsigned int device[2]; // [major, minor] for makedev(major, minor)
+} dev_mknods[] = {
+    {"/dev/null", S_IFCHR | 0666, {1, 3}},
+    {"/dev/zero", S_IFCHR | 0666, {1, 5}},
+    {"/dev/full", S_IFCHR | 0666, {1, 7}},
+    {"/dev/random", S_IFCHR | 0666, {1, 8}},
+    {"/dev/urandom", S_IFCHR | 0666, {1, 9}},
+    {"/dev/tty", S_IFCHR | 0666, {5, 0}},
+    {"/dev/console", S_IFCHR | 0600, {5, 1}},
+};
+
 struct container {
     int pipe_fd[2];
     pid_t pid;
@@ -151,8 +185,6 @@ static void container_init(struct container *self, int argc, char *argv[]) {
 
 bool container_pivot_root(struct container self[static 1]) {
     int cwd_fd = -1;
-    bool is_proc_mounted = false;
-    bool is_sys_mounted = false;
 
     // Make / private so mount changes don't propagate to the parent namespace.
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == -1) {
@@ -191,30 +223,6 @@ bool container_pivot_root(struct container self[static 1]) {
         errMsg("chdir('/') after pivot root");
         goto error;
     }
-    // Ensure /proc exists at new root.
-    if (mkdir("/proc", 0555) == -1 && errno != EEXIST) {
-        errMsg("mkdir('/proc')");
-        goto error;
-    }
-    // Mount fresh /proc.
-    if (mount("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV,
-              NULL) == -1) {
-        errMsg("mount('/proc')");
-        goto error;
-    }
-    is_proc_mounted = true;
-    // Ensure /sys exists at new root.
-    if (mkdir("/sys", 0555) == -1 && errno != EEXIST) {
-        errMsg("mkdir('/sys')");
-        goto error;
-    }
-    // Mount fresh /sys.
-    if (mount("sysfs", "/sys", "sysfs",
-              MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) == -1) {
-        errMsg("mount('/proc')");
-        goto error;
-    }
-    is_sys_mounted = true;
     // Unmount and remove old root.
     if (umount2(self->put_root_path, MNT_DETACH) == -1) {
         errMsg("umount2('%s')", self->put_root_path);
@@ -229,13 +237,6 @@ bool container_pivot_root(struct container self[static 1]) {
     return true;
 
 error:
-    if (is_sys_mounted) {
-        umount2("/sys", MNT_DETACH);
-    }
-    if (is_proc_mounted) {
-        umount2("/proc", MNT_DETACH);
-    }
-
     umount2(self->put_root_path, MNT_DETACH);
     rmdir(self->put_root_path);
 
@@ -246,6 +247,64 @@ error:
     }
 
     return false;
+}
+
+static void container_host_mounts_create(struct container self[static 1]) {
+    char mount_path[PATH_MAX];
+    size_t num_mounts = sizeof(mounts_host) / sizeof(mounts_host[0]);
+    for (size_t i = 0; i < num_mounts; i++) {
+        snprintf(mount_path, PATH_MAX, "%s/%s", self->new_root_path,
+                 mounts_host[i].target);
+        if (mkdir(mount_path, mounts_host[i].perms) == -1 && errno != EEXIST) {
+            errMsg("mkdir('%s')", mount_path);
+        }
+        if (mount(mounts_host[i].source, mount_path, mounts_host[i].fstype,
+                  mounts_host[i].flags, mounts_host[i].data) == -1) {
+            errMsg("mount('%s')", mount_path);
+        }
+    }
+}
+
+static void container_host_mounts_unmount(struct container self[static 1]) {
+    char mount_path[PATH_MAX];
+    size_t num_mounts = sizeof(mounts_host) / sizeof(mounts_host[0]);
+    for (size_t i = num_mounts; i > 0; i--) {
+        snprintf(mount_path, PATH_MAX, "%s/%s", self->new_root_path,
+                 mounts_host[i - 1].target);
+        if (umount2(mount_path, MNT_DETACH) == -1) {
+            errMsg("umount2('%s')", mount_path);
+        }
+    }
+}
+
+static void container_clone_mounts() {
+    size_t num_mounts = sizeof(mounts_container) / sizeof(mounts_container[0]);
+    for (size_t i = 0; i < num_mounts; i++) {
+        if (mkdir(mounts_container[i].target, mounts_container[i].perms) ==
+                -1 &&
+            errno != EEXIST) {
+            errMsg("mkdir('%s')", mounts_container[i].target);
+        }
+        if (mount(mounts_container[i].source, mounts_container[i].target,
+                  mounts_container[i].fstype, mounts_container[i].flags,
+                  mounts_container[i].data) == -1) {
+            errMsg("mount('%s')", mounts_container[i].target);
+        }
+    }
+}
+
+static void container_make_devices(struct container self[static 1]) {
+    char dev_path[PATH_MAX];
+    size_t num_devs = sizeof(dev_mknods) / sizeof(dev_mknods[0]);
+    for (size_t i = 0; i < num_devs; i++) {
+        snprintf(dev_path, PATH_MAX, "%s/%s", self->new_root_path,
+                 dev_mknods[i].path);
+        if (mknod(dev_path, dev_mknods[i].perms,
+                  makedev(dev_mknods[i].device[0], dev_mknods[i].device[1])) ==
+            -1) {
+            errMsg("mknod('%s')", dev_path);
+        }
+    }
 }
 
 static int container_clone_exec(void *self) {
@@ -268,6 +327,8 @@ static int container_clone_exec(void *self) {
     if (!container_pivot_root(c)) {
         errExit("container_pivot_root");
     }
+
+    container_clone_mounts();
 
     if (c->do_verbose) {
         printf("excuting command: %s\n", c->command[0]);
@@ -347,24 +408,14 @@ static void container_wait(struct container self[static 1]) {
     }
 }
 
-static void container_devtmpfs_mount(struct container self[static 1]) {
-    char dev_path[PATH_MAX];
-    snprintf(dev_path, PATH_MAX, "%s/dev", self->new_root_path);
-    if (mkdir(dev_path, 0755) == -1 && errno != EEXIST) {
-        errMsg("mkdir('%s')", dev_path);
-    }
-    if (mount("devtmpfs", dev_path, "devtmpfs", 0, NULL) == -1) {
-        errMsg("mount('%s')", dev_path);
-    }
-}
-
 int main(int argc, char *argv[]) {
     struct container c;
     container_init(&c, argc, argv);
-    // FIXME: devtmpfs not unmouted.
-    // TODO: move from devtmpfs to tmpfs + mknod.
-    container_devtmpfs_mount(&c);
+
+    container_host_mounts_create(&c);
+    container_make_devices(&c);
     container_clone(&c);
+    container_host_mounts_unmount(&c);
     container_uid_map(&c);
     container_wait(&c);
 

@@ -25,6 +25,7 @@ rootfs:
 	@mmdebstrap \
 		--variant=important \
 		--skip=output/dev \
+		--include=vim,libcap-ng-utils,strace \
 		stable > "${ROOTFS}".tar
 	@sudo tar xf "${ROOTFS}.tar" -C "${ROOTFS}"
 	@rm "${ROOTFS}.tar"
