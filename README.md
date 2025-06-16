@@ -59,3 +59,7 @@ crw-r--r-- 1 root root 1, 3 Jun 15 19:00 /dev/null
 
 - [Namespaces in operation](https://lwn.net/Articles/531114/)
 - [lucavallin/barco](https://github.com/lucavallin/barco)
+
+## Next goal
+
+- Add cgroups to be able to run daft-containter inside daft-contaner.

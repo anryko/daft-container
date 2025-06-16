@@ -1,3 +1,4 @@
+#include <asm-generic/errno-base.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/limits.h>
@@ -132,6 +133,15 @@ static const struct dev_mknod {
     {"/dev/urandom", S_IFCHR | 0666, {1, 9}},
     {"/dev/tty", S_IFCHR | 0666, {5, 0}},
     {"/dev/console", S_IFCHR | 0600, {5, 1}},
+};
+
+static const struct dev_symlink {
+    const char *source;
+    const char *target;
+} dev_symlinks[] = {
+    {"/proc/self/fd/0", "/dev/stdin"},
+    {"/proc/self/fd/1", "/dev/stdout"},
+    {"/proc/self/fd/2", "/dev/stderr"},
 };
 
 struct container {
@@ -277,7 +287,7 @@ static void container_host_mounts_unmount(struct container self[static 1]) {
     }
 }
 
-static void container_clone_mounts() {
+static void container_clone_mounts_create() {
     size_t num_mounts = sizeof(mounts_container) / sizeof(mounts_container[0]);
     for (size_t i = 0; i < num_mounts; i++) {
         if (mkdir(mounts_container[i].target, mounts_container[i].perms) ==
@@ -293,7 +303,7 @@ static void container_clone_mounts() {
     }
 }
 
-static void container_make_devices(struct container self[static 1]) {
+static void container_host_devices_create(struct container self[static 1]) {
     char dev_path[PATH_MAX];
     size_t num_devs = sizeof(dev_mknods) / sizeof(dev_mknods[0]);
     for (size_t i = 0; i < num_devs; i++) {
@@ -303,6 +313,16 @@ static void container_make_devices(struct container self[static 1]) {
                   makedev(dev_mknods[i].device[0], dev_mknods[i].device[1])) ==
             -1) {
             errMsg("mknod('%s')", dev_path);
+        }
+    }
+}
+
+static void container_clone_symlinks_create() {
+    size_t num_symlinks = sizeof(dev_symlinks) / sizeof(dev_symlinks[0]);
+    for (size_t i = 0; i < num_symlinks; i++) {
+        if (symlink(dev_symlinks[i].source, dev_symlinks[i].target) == -1 &&
+            errno != EEXIST) {
+            errMsg("symlink('%s')", dev_symlinks[i].target);
         }
     }
 }
@@ -328,7 +348,8 @@ static int container_clone_exec(void *self) {
         errExit("container_pivot_root");
     }
 
-    container_clone_mounts();
+    container_clone_mounts_create();
+    container_clone_symlinks_create();
 
     if (c->do_verbose) {
         printf("excuting command: %s\n", c->command[0]);
@@ -413,7 +434,7 @@ int main(int argc, char *argv[]) {
     container_init(&c, argc, argv);
 
     container_host_mounts_create(&c);
-    container_make_devices(&c);
+    container_host_devices_create(&c);
     container_clone(&c);
     container_host_mounts_unmount(&c);
     container_uid_map(&c);
