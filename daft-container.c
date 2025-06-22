@@ -1,4 +1,3 @@
-#include <asm-generic/errno-base.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/limits.h>
@@ -19,32 +18,11 @@
 #include <syscall.h>
 #include <unistd.h>
 
+#include "utils.c"
+
 static constexpr size_t STACK_SIZE = (size_t)(1024 * 1024); // 1MB
 static bool do_verbose = false;
 
-[[gnu::format(printf, 4, 5)]]
-static inline void errmsg(bool doexit, int excode, bool adderr, const char *fmt,
-                          ...) {
-    if (fmt != NULL) {
-        va_list argp;
-        va_start(argp, fmt);
-        vfprintf(stderr, fmt, argp);
-        va_end(argp);
-        if (adderr) {
-            fprintf(stderr, ": ");
-        }
-    }
-    if (adderr) {
-        fprintf(stderr, "%m");
-    }
-    fprintf(stderr, "\n");
-    if (doexit) {
-        exit(excode);
-    }
-}
-
-#define die(...) errmsg(true, EXIT_FAILURE, true, __VA_ARGS__);
-#define warn(...) errmsg(false, 0, true, __VA_ARGS__)
 #define verbose(...)                                                           \
     do {                                                                       \
         if (do_verbose)                                                        \
